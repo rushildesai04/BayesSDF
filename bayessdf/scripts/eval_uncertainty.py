@@ -45,8 +45,8 @@ from nerfstudio.utils.eval_utils import eval_setup
 from nerfstudio.utils.rich_utils import CONSOLE
 from nerfstudio.utils import colormaps
 
-from bayesrays.metrics.ause import ause
-from bayesrays.metrics.image_metrics import PSNRModule, SSIMModule, LPIPSModule
+from bayessdf.metrics.ause import ause
+from bayessdf.metrics.image_metrics import PSNRModule, SSIMModule, LPIPSModule
 from torchmetrics import MeanSquaredError
 
 
@@ -244,6 +244,11 @@ def get_image_metrics_and_images_unc(self, no:int,
         depth = depth/depth_gt.max()
         depth_gt = depth_gt/depth_gt.max()
 
+        # downsample
+        depth = torch.nn.functional.interpolate(depth.unsqueeze(0).unsqueeze(0), scale_factor=(.5, .5), mode='bilinear').squeeze()
+
+        # downsample uncertainty
+        unc = torch.nn.functional.interpolate(unc.squeeze(-1).unsqueeze(0).unsqueeze(0), scale_factor=(.5, .5), mode='bilinear').squeeze()
 
         squared_error = ((depth_gt - depth) ** 2)
         absolute_error = (abs(depth_gt - depth))
@@ -373,7 +378,6 @@ def get_average_uncertainty_metrics(self, step: Optional[int] = None):
         err_var_all = [np.zeros(100),np.zeros(100),np.zeros(100)] 
 
         for camera_ray_bundle, batch in self.datamanager.fixed_indices_eval_dataloader:
-            
             # time this the following line
             inner_start = time()
             height, width = camera_ray_bundle.shape
@@ -404,6 +408,8 @@ def get_average_uncertainty_metrics(self, step: Optional[int] = None):
             metrics_dict[fps_str] = metrics_dict["num_rays_per_sec"] / (height * width)
             metrics_dict_list.append(metrics_dict)
             view_no +=1
+            if view_no == 4:
+                break
             progress.advance(task)
             
     # average the metrics list

@@ -42,11 +42,11 @@ def get_output_nerfacto_new(self, ray_bundle):
     max_uncertainty = 6 #approximate upper bound of the function log10(1/(x+lambda)) when lambda=1e-4/(256^3) and x is the hessian
     min_uncertainty = -3 #approximate lower bound of that function (cutting off at hessian = 1000)
     density_fns_new = []
-    if self.filter_out:
-        for i in self.density_fns:
-            density_fns_new.append(lambda x, i=i: i(x) * (self.get_uncertainty(x)<= self.filter_thresh*max_uncertainty))
-    else:
-        density_fns_new = self.density_fns
+    # if self.filter_out:
+    #     for i in self.density_fns:
+    #         density_fns_new.append(lambda x, i=i: i(x) * (self.get_uncertainty(x)<= self.filter_thresh*max_uncertainty))
+    # else:
+    density_fns_new = self.density_fns
     
     if pkg_resources.get_distribution("nerfstudio").version >= "0.3.1":
         ray_samples, weights_list, ray_samples_list = self.proposal_sampler(ray_bundle, density_fns=density_fns_new)
@@ -163,6 +163,8 @@ def get_output_neusfacto(self, ray_bundle):
     }
                                     
     original_outputs['uncertainty'] = uncertainty 
+    import pdb; pdb.set_trace()
+    # TODO: SAVE Uncertainty
     if self.training:
         original_outputs["weights_list"] = weights_list
         original_outputs["ray_samples_list"] = ray_samples_list

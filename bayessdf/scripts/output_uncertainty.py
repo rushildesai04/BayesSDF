@@ -1,20 +1,24 @@
-import numpy as np
+#!/usr/bin/env python
+
+"""
+output_uncertainty.py
+"""
+
 import torch
-import nerfstudio
 import pkg_resources
 import nerfacc
-from nerfstudio.models.nerfacto import NerfactoModel
-from nerfstudio.models.instant_ngp import NGPModel
-from nerfstudio.models.mipnerf import MipNerfModel
-from nerfstudio.field_components.field_heads import FieldHeadNames
-from bayessdf.utils.utils import normalize_point_coords, find_grid_indices
-from nerfstudio.utils import colors
-from nerfstudio.model_components.losses import (
-    orientation_loss,
-    pred_normal_loss
-)
-
-
+from nerfstudio.models.nerfacto import NerfactoModel # type:ignore
+from nerfstudio.models.neus_facto import NeuSFactoModel # type:ignore 
+from nerfstudio.models.instant_ngp import NGPModel # type:ignore
+from nerfstudio.models.mipnerf import MipNerfModel # type:ignore
+from nerfstudio.field_components.field_heads import FieldHeadNames # type:ignore
+from nerfstudio.utils import colors # type:ignore
+from nerfstudio.model_components.losses import (orientation_loss, pred_normal_loss) # type:ignore
+from bayessdf.utils.utils import find_grid_indices, normalize_point_coords
+from datetime import datetime
+import numpy as np
+import nerfstudio
+import ipdb
 
 def get_uncertainty(self, points):
     aabb = self.scene_box.aabb.to(points.device)
@@ -31,7 +35,7 @@ def get_uncertainty(self, points):
 
 def get_output_nerfacto_new(self, ray_bundle):
     ''' reimplementation of get_output function from models because of lack of proper interface to outputs dict'''
-#     original_outputs = self.__class__.get_outputs(self, ray_bundle)  # Call original get_outputs (this is slower than just copying the original method here)
+    # original_outputs = self.__class__.get_outputs(self, ray_bundle)  # Call original get_outputs (this is slower than just copying the original method here)
     
     N = self.N
     reg_lambda = 1e-4 /( (2**self.lod)**3)
@@ -41,6 +45,7 @@ def get_output_nerfacto_new(self, ray_bundle):
     max_uncertainty = 6 #approximate upper bound of the function log10(1/(x+lambda)) when lambda=1e-4/(256^3) and x is the hessian
     min_uncertainty = -3 #approximate lower bound of that function (cutting off at hessian = 1000)
     density_fns_new = []
+    
     if self.filter_out:
         for i in self.density_fns:
             density_fns_new.append(lambda x, i=i: i(x) * (self.get_uncertainty(x)<= self.filter_thresh*max_uncertainty))
@@ -51,6 +56,7 @@ def get_output_nerfacto_new(self, ray_bundle):
         ray_samples, weights_list, ray_samples_list = self.proposal_sampler(ray_bundle, density_fns=density_fns_new)
     else:
         ray_samples,_, weights_list, ray_samples_list = self.proposal_sampler(ray_bundle, density_fns=density_fns_new)
+
     field_outputs = self.field(ray_samples, compute_normals=self.config.predict_normals)
     points = ray_samples.frustums.get_positions()
     un_points = self.get_uncertainty(points)
@@ -60,6 +66,7 @@ def get_output_nerfacto_new(self, ray_bundle):
         density = field_outputs[FieldHeadNames.DENSITY] * (un_points <= self.filter_thresh*max_uncertainty)
     else:
         density = field_outputs[FieldHeadNames.DENSITY]
+
     weights = ray_samples.get_weights(density)
     
     uncertainty = torch.sum(weights * un_points, dim=-2) 
@@ -72,21 +79,19 @@ def get_output_nerfacto_new(self, ray_bundle):
     if self.white_bg:
         self.renderer_rgb.background_color=colors.WHITE 
     elif self.black_bg:
-        self.renderer_rgb.background_color=colors.BLACK     
+        self.renderer_rgb.background_color=colors.BLACK  
+
     rgb = self.renderer_rgb(rgb=field_outputs[FieldHeadNames.RGB], weights=weights)
     depth = self.renderer_depth(weights=weights, ray_samples=ray_samples)
     accumulation = self.renderer_accumulation(weights=weights)
 
-    original_outputs = {
-        "rgb": rgb,
-        "accumulation": accumulation,
-        "depth": depth,
-    }
-                                    
+    original_outputs = {"rgb": rgb, "accumulation": accumulation, "depth": depth}  
     original_outputs['uncertainty'] = uncertainty 
+
     if self.training:
         original_outputs["weights_list"] = weights_list
         original_outputs["ray_samples_list"] = ray_samples_list
+
     if self.config.predict_normals:
         normals = self.renderer_normals(normals=field_outputs[FieldHeadNames.NORMALS], weights=weights)
         pred_normals = self.renderer_normals(field_outputs[FieldHeadNames.PRED_NORMALS], weights=weights)
@@ -94,19 +99,96 @@ def get_output_nerfacto_new(self, ray_bundle):
         original_outputs["pred_normals"] = self.normals_shader(pred_normals)    
 
     if self.training and self.config.predict_normals:
-        original_outputs["rendered_orientation_loss"] = orientation_loss(
-            weights.detach(), field_outputs[FieldHeadNames.NORMALS], ray_bundle.directions
-        )
-
-        original_outputs["rendered_pred_normal_loss"] = pred_normal_loss(
-            weights.detach(),
-            field_outputs[FieldHeadNames.NORMALS].detach(),
-            field_outputs[FieldHeadNames.PRED_NORMALS],
-        )
+        original_outputs["rendered_orientation_loss"] = orientation_loss(weights.detach(), 
+                                                                         field_outputs[FieldHeadNames.NORMALS], 
+                                                                         ray_bundle.directions)
+        original_outputs["rendered_pred_normal_loss"] = pred_normal_loss(weights.detach(), 
+                                                                         field_outputs[FieldHeadNames.NORMALS].detach(), 
+                                                                         field_outputs[FieldHeadNames.PRED_NORMALS])
 
     for i in range(self.config.num_proposal_iterations):
         original_outputs[f"prop_depth_{i}"] = self.renderer_depth(weights=weights_list[i], ray_samples=ray_samples_list[i])
 
+
+    return original_outputs
+
+def get_output_neusfacto(self, ray_bundle):
+    ''' reimplementation of get_output function from models because of lack of proper interface to outputs dict'''
+    model_outputs = self.__class__.get_outputs(self, ray_bundle)
+
+    samples_and_field_outputs = self.sample_and_forward_field(ray_bundle=ray_bundle)
+
+    N = self.N
+    reg_lambda = 1e-4 /( (2**self.lod)**3)
+    H = self.hessian/N + reg_lambda
+    self.un = 1/H
+            
+    max_uncertainty = 6 # approximate upper bound of log10(1/(x+lambda)) when lambda=1e-4/(256^3) and x is hessian
+    min_uncertainty = -3 # approximate lower bound of that function (cutting off at hessian = 1000)
+    density_fns_new = []
+
+    if self.filter_out:
+        for i in self.density_fns:
+            density_fns_new.append(lambda x, i=i: i(x) * (self.get_uncertainty(x)<= self.filter_thresh*max_uncertainty))
+    else:
+        density_fns_new = self.density_fns
+
+    ray_samples, weights_list, ray_samples_list = self.proposal_sampler(ray_bundle, density_fns=density_fns_new)
+    field_outputs = samples_and_field_outputs["field_outputs"]
+    points = ray_samples.frustums.get_positions()
+    un_points = self.get_uncertainty(points)
+
+    sdf_array = field_outputs[FieldHeadNames.SDF].cpu().numpy()
+    # np.savez(f"/pscratch/sd/r/rushil/model.npz", sdf=sdf_array)
+
+    #get weights
+    weights = samples_and_field_outputs["weights"]
+    
+    uncertainty = torch.sum(weights * un_points, dim=-2) 
+    uncertainty += (1-torch.sum(weights,dim=-2)) * min_uncertainty #alpha blending
+    
+    #normalize into acceptable range for rendering
+    uncertainty = torch.clip(uncertainty, min_uncertainty, 5)
+    uncertainty = (uncertainty-min_uncertainty)/(5-min_uncertainty)
+    
+    if self.white_bg:
+        self.renderer_rgb.background_color=colors.WHITE 
+    elif self.black_bg:
+        self.renderer_rgb.background_color=colors.BLACK     
+
+    rgb = self.renderer_rgb(rgb=field_outputs[FieldHeadNames.RGB], weights=weights)
+    depth = self.renderer_depth(weights=weights, ray_samples=ray_samples)
+    depth = depth / ray_bundle.directions_norm
+    # depth = depth / ray_bundle.metadata["directions_norm"] # NERFSTUDIO
+    accumulation = self.renderer_accumulation(weights=weights)
+
+    original_outputs = {"rgb": rgb, "accumulation": accumulation, "depth": depth, 'uncertainty': uncertainty}
+
+    if self.training:
+        original_outputs["weights_list"] = weights_list
+        original_outputs["ray_samples_list"] = ray_samples_list
+
+    # TODO: Ignore normals since NeuS has FieldHeadNames.NORMAL but not FieldHeadNames.PRED_NORMALS
+
+    original_outputs["normal"] = self.renderer_normal(semantics=field_outputs[FieldHeadNames.NORMAL], weights=weights)  
+    original_outputs["rendered_orientation_loss"] = orientation_loss(weights.detach(), 
+                                                                     field_outputs[FieldHeadNames.NORMAL], 
+                                                                     ray_bundle.directions)
+
+    # original_outputs["normal"] = self.renderer_normal(semantics=field_outputs[FieldHeadNames.NORMALS], weights=weights) # NERFSTUDIO
+    # original_outputs["rendered_orientation_loss"] = orientation_loss(weights.detach(), 
+    #                                                                  field_outputs[FieldHeadNames.NORMALS], 
+    #                                                                  ray_bundle.directions) # NERFSTUDIO
+
+    for i in range(self.config.num_proposal_iterations):
+        original_outputs[f"prop_depth_{i}"] = self.renderer_depth(weights=weights_list[i], ray_samples=ray_samples_list[i])
+
+    original_outputs["sdf"] = sdf_array
+    original_outputs["weights"] = model_outputs["weights"]
+    original_outputs["ray_points"] = model_outputs["ray_points"]
+    original_outputs["normal_vis"] = model_outputs["normal_vis"]
+    original_outputs["directions_norm"] = ray_bundle.directions_norm
+    # original_outputs["directions_norm"] = ray_bundle.metadata["directions_norm"] # NERFSTUDIO
 
     return original_outputs
 
@@ -273,6 +355,8 @@ def get_output_fn(model):
         return get_output_ngp_new
     elif isinstance(model, MipNerfModel):
         return get_output_mipnerf_new
+    elif isinstance(model, NeuSFactoModel):
+        return get_output_neusfacto
     else:
         raise Exception("Sorry, this model is not currently supported.")
 

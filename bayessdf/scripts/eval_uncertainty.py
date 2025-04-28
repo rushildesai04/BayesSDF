@@ -1,69 +1,241 @@
-# Copyright 2022 the Regents of the University of California, Nerfstudio Team and contributors. All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 #!/usr/bin/env python
+
 """
 eval.py
 """
+
 from __future__ import annotations
 
-from datetime import datetime
-import json
-import types
-import torch
-import mediapy as media
-from dataclasses import dataclass
-from time import time
-from pathlib import Path
-from typing import Optional
-from rich.progress import (
-    BarColumn,
-    MofNCompleteColumn,
-    Progress,
-    TextColumn,
-    TimeElapsedColumn,
-)
-import tyro
-import numpy as np
-import cv2
+import json # type:ignore
+import types # type:ignore
+import torch # type:ignore
+import mediapy as media # type:ignore
+import tyro # type:ignore
+import numpy as np # type:ignore
+import open3d as o3d # type:ignore
+import pkg_resources # type:ignore
+import cv2 # type:ignore
+import nerfstudio # type:ignore
+from torchmetrics import MeanSquaredError # type:ignore
+import ipdb # type:ignore
 
-import nerfstudio
-import pkg_resources
+from datetime import datetime # type:ignore
+from dataclasses import dataclass # type:ignore
+from time import time # type:ignore
+from pathlib import Path # type:ignore
+from typing import Dict, Optional, Tuple # type:ignore
+from rich.progress import (BarColumn, MofNCompleteColumn, Progress, TextColumn, TimeElapsedColumn) # type:ignore
+from PIL import Image # type:ignore
+from matplotlib.cm import inferno # type:ignore
+import matplotlib.pyplot as plt # type:ignore
+from nerfstudio.utils.eval_utils import eval_setup # type:ignore
+from nerfstudio.utils.rich_utils import CONSOLE # type:ignore
+from nerfstudio.utils import colormaps # type:ignore
+from bayesrays.metrics.ause import ause # type:ignore
+from bayesrays.metrics.image_metrics import PSNRModule, SSIMModule, LPIPSModule # type:ignore
+from bayessdf.scripts.output_uncertainty import get_output_fn, get_output_nerfacto_all, get_uncertainty # type:ignore
+from bayessdf.scripts.ensemble_stats import BASKET_MEAN, AFRICA_MEAN
 
-from nerfstudio.utils.eval_utils import eval_setup
-from nerfstudio.utils.rich_utils import CONSOLE
-from nerfstudio.utils import colormaps
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
-from bayesrays.metrics.ause import ause
-from bayesrays.metrics.image_metrics import PSNRModule, SSIMModule, LPIPSModule
-from torchmetrics import MeanSquaredError
+def calculate_grid(pred_sdf, gt_sdf, type):
+    if pred_sdf.shape != gt_sdf.shape:
+        raise ValueError("Predicted SDF and Ground Truth SDF Do Not Have Same Shape")
+    if type == 'mae':
+        return np.abs(pred_sdf - gt_sdf)
+    elif type == 'mse':
+        return np.abs(pred_sdf - gt_sdf) ** 2
+    else:
+        return np.sqrt((1 / len(pred_sdf) * (np.abs(pred_sdf - gt_sdf) ** 2)))
 
+def calculate_ensemble_curve(variance_grid, mae_grid):
+    variances = variance_grid.flatten()
+    mae_values = mae_grid.flatten()
 
-from PIL import Image
-import matplotlib.pyplot as plt
-from matplotlib.cm import inferno
+    sorted_values = np.sort(mae_values)
+    
+    sorted_var_indices = np.argsort(-variances)
+    sorted_var_values = mae_values[sorted_var_indices]
 
-from bayessdf.scripts.output_uncertainty import get_output_nerfacto_new, get_output_mipnerf_new, get_output_ngp_new, get_output_fn, get_output_nerfacto_all, get_uncertainty
+    cumulative_mae = np.cumsum(sorted_values) / np.arange(1, len(sorted_values) + 1)
+    cumulative_var_mae = np.cumsum(sorted_var_values) / np.arange(1, len(sorted_var_values) + 1)
 
-def plot_errors(ratio_removed, ause_err, ause_err_by_var, err_type, scene_no, output_path): #AUSE plots, with oracle curve also visible
-    plt.plot(ratio_removed, ause_err, '--')
-    plt.plot(ratio_removed, ause_err_by_var, '-r')
-    # plt.plot(ratio_removed, ause_err_by_var - ause_err, '-g') # uncomment for getting plots similar to the paper, without visible oracle curve
-    path = output_path.parent / Path("plots") 
+    return cumulative_mae, cumulative_var_mae
+
+# def plot_errors(ratio_removed, ause_err, ause_err_by_var, err_type, scene_no, output_path, cumulative_mae, cumulative_var_mae, render_mae, render_var_mae):
+def plot_errors(ratio_removed, ause_err, ause_err_by_var, err_type, scene_no, output_path):
+    plt.figure(figsize=(8, 5))
+    plt.plot(ratio_removed, ause_err, color='purple', label=f'{err_type.upper()} Unc Sorted')
+    plt.legend(loc='best', fontsize=6)
+    plt.title(f'Δ{err_type.upper()} vs. Pixel Sparsification', fontsize=18)
+    plt.xlabel('Pixel Sparsification (Most Uncertain to Most Certain %)', fontsize=14)
+    plt.ylabel(f'Cumulative Δ{err_type.upper()}', fontsize=14)
+    plt.xticks([0, 0.25, 0.5, 0.75, 1], ['Most Uncertain Pixel', '25% Uncertainty', '50% Uncertainty', '75% Uncertainty', 'Most Certain Pixel'], fontsize=6)
+    for i in np.arange(0, 1, 0.2):
+        plt.axhspan(i, i + 0.2, facecolor='lightgreen', alpha=0.7, zorder=-1)
+    plt.grid(True, color='white', linewidth=0.7)
+    ax = plt.gca()
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    path = output_path.parent / Path("eval_plots") 
     path.mkdir(parents=True, exist_ok=True)
-    plt.savefig(path/ Path('plot_'+err_type+'_'+str(scene_no)+'.png'))
-    plt.figure()
+    plt.savefig(path / Path('mae_norm_' + err_type + '_' + str(scene_no) + '.png'))
+    plt.close()
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(ratio_removed, ause_err, label=f'{err_type.upper()} Unc Sorted', color="purple", linewidth=2)
+    plt.xlabel(f"Pixel Sparsification (Most Uncertain to Most Certain %)")
+    plt.ylabel(f'Cumulative Δ{err_type.upper()}')
+    plt.title(f"Δ{err_type.upper()} vs. Pixel Sparsification")
+    plt.legend()
+    plt.grid()
+    path = output_path.parent / Path("unc_plots") 
+    path.mkdir(parents=True, exist_ok=True)
+    plt.savefig(path / Path('mae_norm_' + err_type + '_' + str(scene_no) + '.png'))
+    plt.close()
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(ratio_removed, ause_err_by_var, color='blue', label=f'{err_type.upper()} Unc Sorted By Var')
+    plt.legend(loc='best', fontsize=6)
+    plt.title(f'Δ{err_type.upper()} vs. Pixel Sparsification', fontsize=18)
+    plt.xlabel('Pixel Sparsification (Most Uncertain to Most Certain %)', fontsize=14)
+    plt.ylabel(f'Cumulative Δ{err_type.upper()}', fontsize=14)
+    plt.xticks([0, 0.25, 0.5, 0.75, 1], ['Most Uncertain Pixel', '25% Uncertainty', '50% Uncertainty', '75% Uncertainty', 'Most Certain Pixel'], fontsize=6)
+    for i in np.arange(0, 1, 0.2):
+        plt.axhspan(i, i + 0.2, facecolor='lightgreen', alpha=0.7, zorder=-1)
+    plt.grid(True, color='white', linewidth=0.7)
+    ax = plt.gca()
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    path = output_path.parent / Path("eval_plots") 
+    path.mkdir(parents=True, exist_ok=True)
+    plt.savefig(path / Path('mae_var_' + err_type + '_' + str(scene_no) + '.png'))
+    plt.close()
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(ratio_removed, ause_err_by_var, label=f'{err_type.upper()} Unc Sorted By Var', color="blue", linewidth=2)
+    plt.xlabel(f"Pixel Sparsification (Most Uncertain to Most Certain %)")
+    plt.ylabel(f'Cumulative Δ{err_type.upper()}')
+    plt.title(f"Δ{err_type.upper()} vs. Pixel Sparsification")
+    plt.legend()
+    plt.grid()
+    path = output_path.parent / Path("unc_plots") 
+    path.mkdir(parents=True, exist_ok=True)
+    plt.savefig(path / Path('mae_var_' + err_type + '_' + str(scene_no) + '.png'))
+    plt.close()
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(ratio_removed, abs(ause_err_by_var - ause_err), color='red', label=f'{err_type.upper()} Unc Difference')
+    plt.legend(loc='best', fontsize=6)
+    plt.title(f'Δ{err_type.upper()} vs. Pixel Sparsification', fontsize=18)
+    plt.xlabel('Pixel Sparsification (Most Uncertain to Most Certain %)', fontsize=14)
+    plt.ylabel(f'Cumulative Δ{err_type.upper()}', fontsize=14)
+    plt.xticks([0, 0.25, 0.5, 0.75, 1], ['Most Uncertain Pixel', '25% Uncertainty', '50% Uncertainty', '75% Uncertainty', 'Most Certain Pixel'], fontsize=6)
+    for i in np.arange(0, 1, 0.2):
+        plt.axhspan(i, i + 0.2, facecolor='lightgreen', alpha=0.7, zorder=-1)
+    plt.grid(True, color='white', linewidth=0.7)
+    ax = plt.gca()
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    path = output_path.parent / Path("eval_plots") 
+    path.mkdir(parents=True, exist_ok=True)
+    plt.savefig(path / Path('mae_diff_' + err_type + '_' + str(scene_no) + '.png'))
+    plt.close()
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(ratio_removed, abs(ause_err_by_var - ause_err), label=f'{err_type.upper()} Unc Difference', color="red", linewidth=2)
+    plt.xlabel(f"Pixel Sparsification (Most Uncertain to Most Certain %)")
+    plt.ylabel(f'Cumulative Δ{err_type.upper()}')
+    plt.title(f"Δ{err_type.upper()} vs. Pixel Sparsification")
+    plt.legend()
+    plt.grid()
+    path = output_path.parent / Path("unc_plots") 
+    path.mkdir(parents=True, exist_ok=True)
+    plt.savefig(path / Path('mae_diff_' + err_type + '_' + str(scene_no) + '.png'))
+    plt.close()
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(ratio_removed, ause_err, color='purple', label=f'{err_type.upper()} Unc Sorted')
+    plt.plot(ratio_removed, ause_err_by_var, color='blue', label=f'{err_type.upper()} Unc Sorted By Var')
+    # plt.plot(ratio_removed, cumulative_mae, color='blue', label=f'{err_type.upper()} SDF Err')
+    # plt.plot(ratio_removed, cumulative_var_mae, color='blue', label=f'{err_type.upper()} SDF Var Err')'
+    # plt.plot(ratio_removed, render_mae, color='green', label=f'{err_type.upper()} Renderings Err')
+    # plt.plot(ratio_removed, render_var_mae, color='green', label=f'{err_type.upper()} Renderings Var Err')'
+    plt.plot(ratio_removed, abs(ause_err_by_var - ause_err), color='red', label=f'{err_type.upper()} Unc Difference')
+    # plt.plot(np.linspace(0, 1, len(cumulative_mae)), abs(cumulative_mae - cumulative_var_mae), color='blue', label='SDF (Var-Err)')
+    # plt.plot(np.linspace(0, 1, len(render_mae)), abs(render_mae - render_var_mae), color='green', label='Renerings (Var-Err)')
+    plt.legend(loc='best', fontsize=6)
+    plt.title(f'Δ{err_type.upper()} vs. Pixel Sparsification', fontsize=18)
+    plt.xlabel('Pixel Sparsification (Most Uncertain to Most Certain %)', fontsize=14)
+    plt.ylabel(f'Cumulative Δ{err_type.upper()}', fontsize=14)
+    plt.xticks([0, 0.25, 0.5, 0.75, 1], ['Most Uncertain Pixel', '25% Uncertainty', '50% Uncertainty', '75% Uncertainty', 'Most Certain Pixel'], fontsize=6)
+    for i in np.arange(0, 1, 0.2):
+        plt.axhspan(i, i + 0.2, facecolor='lightgreen', alpha=0.7, zorder=-1)
+    plt.grid(True, color='white', linewidth=0.7)
+    ax = plt.gca()
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    path = output_path.parent / Path("eval_plots") 
+    path.mkdir(parents=True, exist_ok=True)
+    plt.savefig(path / Path('mae_cumul_' + err_type + '_' + str(scene_no) + '.png'))
+    plt.close()
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(ratio_removed, ause_err, label=f'{err_type.upper()} Unc Sorted', color="purple", linewidth=2)
+    plt.plot(ratio_removed, ause_err_by_var, label=f'{err_type.upper()} Unc Sorted By Var', color="blue", linewidth=2)
+    plt.plot(ratio_removed, abs(ause_err_by_var - ause_err), label=f'{err_type.upper()} Unc Difference', color="red", linewidth=2)
+    plt.xlabel(f"Pixel Sparsification (Most Uncertain to Most Certain %)")
+    plt.ylabel(f'Cumulative Δ{err_type.upper()}')
+    plt.title(f"Δ{err_type.upper()} vs. Pixel Sparsification")
+    plt.legend()
+    plt.grid()
+    path = output_path.parent / Path("unc_plots") 
+    path.mkdir(parents=True, exist_ok=True)
+    plt.savefig(path / Path('mae_cumul_' + err_type + '_' + str(scene_no) + '.png'))
+    plt.close()
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(ratio_removed, abs(ause_err_by_var - ause_err), color='red', label=f'{err_type.upper()} Unc Difference')
+    plt.plot(ratio_removed, AFRICA_MEAN, color='green', label=f'Ensemble Unc Difference')
+    plt.legend(loc='best', fontsize=6)
+    plt.title(f'Δ{err_type.upper()} vs. Pixel Sparsification', fontsize=18)
+    plt.xlabel('Pixel Sparsification (Most Uncertain to Most Certain %)', fontsize=14)
+    plt.ylabel(f'Cumulative Δ{err_type.upper()}', fontsize=14)
+    plt.xticks([0, 0.25, 0.5, 0.75, 1], ['Most Uncertain Pixel', '25% Uncertainty', '50% Uncertainty', '75% Uncertainty', 'Most Certain Pixel'], fontsize=6)
+    for i in np.arange(0, 1, 0.2):
+        plt.axhspan(i, i + 0.2, facecolor='lightgreen', alpha=0.7, zorder=-1)
+    plt.grid(True, color='white', linewidth=0.7)
+    ax = plt.gca()
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    path = output_path.parent / Path("eval_plots") 
+    path.mkdir(parents=True, exist_ok=True)
+    plt.savefig(path / Path('mae_ens_' + err_type + '_' + str(scene_no) + '.png'))
+    plt.close()
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(ratio_removed, abs(ause_err_by_var - ause_err), label=f'{err_type.upper()} Unc Difference', color="red", linewidth=2)
+    plt.plot(ratio_removed, AFRICA_MEAN, label=f'Ensemble Unc Difference', color="green", linewidth=2)
+    plt.xlabel(f"Pixel Sparsification (Most Uncertain to Most Certain %)")
+    plt.ylabel(f'Cumulative Δ{err_type.upper()}')
+    plt.title(f"Δ{err_type.upper()} vs. Pixel Sparsification")
+    plt.legend()
+    plt.grid()
+    path = output_path.parent / Path("unc_plots") 
+    path.mkdir(parents=True, exist_ok=True)
+    plt.savefig(path / Path('mae_ens_' + err_type + '_' + str(scene_no) + '.png'))
+    plt.close()
 
 def visualize_ranks(unc ,gt, colormap='jet'):
     flattened_unc = unc.flatten()
@@ -91,8 +263,9 @@ def visualize_ranks(unc ,gt, colormap='jet'):
     return colored_unc, colored_gt
 
 def get_filtered_image_metrics(self, 
-                                 outputs: Dict[str, torch.Tensor],
-                                 batch: Dict[str, torch.Tensor], thresh: torch.Tensor, add_nb_mask=False, visibility_mask: torch.Tensor=None) -> Tuple[Dict[str, float], Dict[str, torch.Tensor]]:
+                               outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor], 
+                               thresh: torch.Tensor, add_nb_mask=False, 
+                               visibility_mask: torch.Tensor=None) -> Tuple[Dict[str, float], Dict[str, torch.Tensor]]:
     
     image = batch["image"]
     rgb = outputs["rgb-"+"{:.2f}".format(thresh.item())]
@@ -195,6 +368,35 @@ def get_average_filtered_image_metrics(self, step: Optional[int] = None):
             views.append(str(view_no))    
             view_no +=1
             progress.advance(task)
+
+    # for camera_ray_bundle, batch in self.datamanager.fixed_indices_eval_dataloader:
+        
+    #     if self.add_nb_mask:
+    #         base_path = self.nb_mask_path
+    #         pseudo_gt_visibility = media.read_image(str(base_path)+"/{:05d}.png".format(view_no))
+    #         pseudo_gt_visibility = torch.from_numpy(pseudo_gt_visibility).long().to(self.device)
+    #         pseudo_gt_visibility = (pseudo_gt_visibility[..., 0] >= 1).float()
+    #     else:
+    #         pseudo_gt_visibility = 1
+        
+    #     # time this the following line
+    #     inner_start = time()
+    #     height, width = camera_ray_bundle.shape
+    #     num_rays = height * width
+        
+    #     outputs = self.model.get_outputs_for_camera_ray_bundle(camera_ray_bundle)
+    #     for n,thresh in enumerate(thresh_values):
+    #         metrics_dict = self.model.get_image_metrics_and_images(outputs, batch, thresh, self.add_nb_mask, pseudo_gt_visibility)
+    #         psnr[n].append(float(metrics_dict["psnr"]))
+    #         lpips[n].append(float(metrics_dict["lpips"]))
+    #         ssim[n].append(float(metrics_dict["ssim"]))
+    #         coverage[n].append(float(metrics_dict["coverage"]))
+            
+    #         print("view:", view_no, "-", str(thresh), "psnr:", psnr[n][-1], "coverage:", coverage[n][-1])
+
+    #     views.append(str(view_no))    
+    #     view_no +=1
+    #     progress.advance(task)
             
 
     # average the metrics list
@@ -208,8 +410,6 @@ def get_average_filtered_image_metrics(self, step: Optional[int] = None):
     self.train()
     return {}, lists
 
-
-
 def get_image_metrics_and_images_unc(self, no:int,
                                  outputs: Dict[str, torch.Tensor],
                                  batch: Dict[str, torch.Tensor], 
@@ -220,8 +420,17 @@ def get_image_metrics_and_images_unc(self, no:int,
     """ From https://github.com/nerfstudio-project/nerfstudio/blob/main/nerfstudio/models/nerfacto.py#L357 """
     image = batch["image"].to(self.device)
     rgb = outputs["rgb"]
-
     unc = outputs["uncertainty"]
+
+    pred_sdf_array = np.load("/pscratch/sd/r/rushil/lightfieldOutputs/basketEnsemble/eight/neus-facto/2024-11-02_213841/128.npz")['values'].reshape((128, 128, 128))
+    gt_sdf_array = np.load("/pscratch/sd/r/rushil/lightfieldData/basket/sdfs/128_gt.npz")['sdf']
+    stats_sdf_array = np.load("/pscratch/sd/r/rushil/lightfieldOutputs/basketEnsemble/stats_128.npz")
+    var_sdf_array = stats_sdf_array['var'].reshape((128, 128, 128))
+
+    pred_render_array = np.load("/pscratch/sd/r/rushil/lightfieldOutputs/basketEnsemble/eight/neus-facto/2024-11-02_213841/render_rgb.npy")
+    stats_render_array = np.load("/pscratch/sd/r/rushil/lightfieldOutputs/basketEnsemble/stats_rgb.npz")
+    gt_render_array = stats_render_array['mean']
+    var_render_array = stats_render_array['var']
 
     acc = colormaps.apply_colormap(outputs["accumulation"])
     depth = colormaps.apply_depth_colormap(
@@ -236,14 +445,26 @@ def get_image_metrics_and_images_unc(self, no:int,
         depth = outputs["depth"].squeeze(-1)
         
         # load the calculated scale, to run evaluation on depth in same scale as GT depth
-        a = float(np.loadtxt(str(self.dataset_path) +'/scale_parameters.txt', delimiter=','))
+        a = float(np.loadtxt(str(self.dataset_path) + '/scale_parameters.txt', delimiter=','))
         depth = a * depth 
+        # depth_gt_dir = str(self.dataset_path) + '/gt.npy'
+        # point_cloud = o3d.io.read_point_cloud(str(self.dataset_path) + '/gt.ply')
+        # points = np.asarray(point_cloud.points)
+        # np.save(depth_gt_dir, points)
         depth_gt_dir = str(self.dataset_path) + '/depth_gt_{:02d}.npy'.format(no)
         depth_gt = np.load(depth_gt_dir)
         depth_gt = torch.tensor(depth_gt, device=depth.device)
         depth = depth/depth_gt.max()
         depth_gt = depth_gt/depth_gt.max()
 
+        # downsample
+        depth = torch.nn.functional.interpolate(depth.unsqueeze(0).unsqueeze(0), scale_factor=(.5, .5), mode='bilinear')
+        depth = torch.nn.functional.interpolate(depth, size=depth_gt.shape, mode='bilinear').squeeze()
+        # depth = torch.nn.functional.interpolate(depth.permute(2, 0, 1).unsqueeze(0), scale_factor=(.5, .5), mode='bilinear').squeeze()
+
+        # downsample uncertainty
+        unc = torch.nn.functional.interpolate(unc.squeeze(-1).unsqueeze(0).unsqueeze(0), scale_factor=(.5, .5), mode='bilinear')
+        unc = torch.nn.functional.interpolate(unc, size=depth_gt.shape, mode='bilinear').squeeze()
 
         squared_error = ((depth_gt - depth) ** 2)
         absolute_error = (abs(depth_gt - depth))
@@ -252,10 +473,22 @@ def get_image_metrics_and_images_unc(self, no:int,
         squared_error_flat = squared_error.flatten()
 
         ratio, err_mse, err_var_mse, ause_mse = ause(unc_flat, squared_error_flat, err_type='mse')
+        # err_grid = calculate_grid(pred_sdf_array, gt_sdf_array, 'mse')
+        # cumulative_mae, cumulative_var_mae = calculate_ensemble_curve(var_sdf_array, err_grid)
+        # err_render = calculate_grid(pred_render_array, gt_render_array, 'mse')
+        # render_mae, render_var_mae = calculate_ensemble_curve(var_render_array, err_render)
         plot_errors(ratio, err_mse, err_var_mse, 'mse', no, self.output_path)
         ratio, err_mae, err_var_mae, ause_mae =  ause(unc_flat, absolute_error_flat, err_type='mae')
+        # err_grid = calculate_grid(pred_sdf_array, gt_sdf_array, 'mae')
+        # cumulative_mae, cumulative_var_mae = calculate_ensemble_curve(var_sdf_array, err_grid)
+        # err_render = calculate_grid(pred_render_array, gt_render_array, 'mae')
+        # render_mae, render_var_mae = calculate_ensemble_curve(var_render_array, err_render)
         plot_errors(ratio, err_mae, err_var_mae, 'mae', no, self.output_path)
         ratio, err_rmse, err_var_rmse, ause_rmse =  ause(unc_flat, squared_error_flat, err_type='rmse')
+        # err_grid = calculate_grid(pred_sdf_array, gt_sdf_array, 'rmse')
+        # cumulative_mae, cumulative_var_mae = calculate_ensemble_curve(var_sdf_array, err_grid)
+        # err_render = calculate_grid(pred_render_array, gt_render_array, 'rmse')
+        # render_mae, render_var_mae = calculate_ensemble_curve(var_render_array, err_render)
         plot_errors(ratio, err_rmse, err_var_rmse, 'rmse', no, self.output_path)
 
         err_all[0] += err_mse
@@ -269,18 +502,16 @@ def get_image_metrics_and_images_unc(self, no:int,
             ratio_all = ratio
             err_mse_all, err_rmse_all, err_mae_all = err_all[0]/(no+1), err_all[1]/(no+1), err_all[2]/(no+1)
             err_var_mse_all, err_var_rmse_all, err_var_mae_all = err_var_all[0]/(no+1), err_var_all[1]/(no+1), err_var_all[2]/(no+1)
-            plot_errors(ratio_all, err_mse_all, err_var_mse_all, 'mse', 'all', self.output_path)
-            plot_errors(ratio_all, err_rmse_all, err_var_rmse_all, 'rmse', 'all', self.output_path)
-            plot_errors(ratio_all, err_mae_all, err_var_mae_all, 'mae', 'all', self.output_path)
-
-
+            # plot_errors(ratio_all, err_mse_all, err_var_mse_all, 'mse', 'all', self.output_path)
+            # plot_errors(ratio_all, err_rmse_all, err_var_rmse_all, 'rmse', 'all', self.output_path)
+            # plot_errors(ratio_all, err_mae_all, err_var_mae_all, 'mae', 'all', self.output_path)
 
         #for visualizaiton
         depth_img = torch.clip(depth, min=0., max=1.)
         absolute_error_img = torch.clip(absolute_error, min=0., max=1.)
     
     #save images
-    path = self.output_path.parent / "plots" 
+    path = self.output_path.parent / "eval_images" 
     path.mkdir(parents=True, exist_ok=True)
     if eval_depth:
         im = Image.fromarray((depth_gt.cpu().numpy()* 255).astype('uint8'))
@@ -298,9 +529,9 @@ def get_image_metrics_and_images_unc(self, no:int,
 
         im = Image.fromarray(np.uint8(errr * 255))
         im.save(path / Path(str(no)+"_error_colored.png"))
-
     
-  
+    
+    
     im = Image.fromarray(np.uint8(inferno(unc.squeeze(-1).cpu().numpy()) * 255).astype('uint8'))
     im.save(path / Path(str(no)+"_unc.png"))
     im = Image.fromarray(np.uint8(rgb.cpu().numpy() * 255).astype('uint8'))
@@ -367,15 +598,15 @@ def get_average_uncertainty_metrics(self, step: Optional[int] = None):
         MofNCompleteColumn(),
         transient=True,
     ) as progress:
-        task = progress.add_task("[green]Evaluating all eval images...", total=num_images)
+        task = progress.add_task("[green]Evaluating all eval images...", total=4)
         view_no = 0
         err_all = [np.zeros(100),np.zeros(100),np.zeros(100)]
         err_var_all = [np.zeros(100),np.zeros(100),np.zeros(100)] 
 
         for camera_ray_bundle, batch in self.datamanager.fixed_indices_eval_dataloader:
-            
             # time this the following line
             inner_start = time()
+            # camera_ray_bundle = camera_ray_bundle.generate_rays(camera_indices=0) # NERFSTUDIO
             height, width = camera_ray_bundle.shape
             num_rays = height * width
             outputs = self.model.get_outputs_for_camera_ray_bundle(camera_ray_bundle)
@@ -391,6 +622,7 @@ def get_average_uncertainty_metrics(self, step: Optional[int] = None):
             psnr.append(float(metrics_dict["psnr"]))
             lpips.append(float(metrics_dict["lpips"]))
             ssim.append(float(metrics_dict["ssim"]))
+
             if self.eval_depth:
                 ause_mse.append(float(metrics_dict["ause_mse"]))
                 ause_mae.append(float(metrics_dict["ause_mae"]))
@@ -404,7 +636,46 @@ def get_average_uncertainty_metrics(self, step: Optional[int] = None):
             metrics_dict[fps_str] = metrics_dict["num_rays_per_sec"] / (height * width)
             metrics_dict_list.append(metrics_dict)
             view_no +=1
+            if view_no == 4:
+                break
             progress.advance(task)
+
+    # for camera_ray_bundle, batch in self.datamanager.fixed_indices_eval_dataloader:
+    #     # time this the following line
+    #     inner_start = time()
+    #     # camera_ray_bundle = camera_ray_bundle.generate_rays(camera_indices=0) # NERFSTUDIO
+    #     height, width = camera_ray_bundle.shape
+    #     num_rays = height * width
+    #     outputs = self.model.get_outputs_for_camera_ray_bundle(camera_ray_bundle)
+    #     metrics_dict, images_dict = self.model.get_image_metrics_and_images(view_no, outputs, batch, err_all, err_var_all, view_no == len(self.datamanager.fixed_indices_eval_dataloader)-1, self.eval_depth)
+    #     if self.eval_depth:
+    #         mse_list.append(metrics_dict["mse"])
+    #         err_all = images_dict['err_all'] 
+    #         err_var_all = images_dict['err_var_all']
+
+        
+    #     # TODO do this in a cleaner way
+    #     views.append(str(view_no))
+    #     psnr.append(float(metrics_dict["psnr"]))
+    #     lpips.append(float(metrics_dict["lpips"]))
+    #     ssim.append(float(metrics_dict["ssim"]))
+
+    #     if self.eval_depth:
+    #         ause_mse.append(float(metrics_dict["ause_mse"]))
+    #         ause_mae.append(float(metrics_dict["ause_mae"]))
+    #         ause_rmse.append(float(metrics_dict["ause_rmse"]))
+    #         mse.append(float(metrics_dict["mse"]))
+
+    #     assert "num_rays_per_sec" not in metrics_dict
+    #     metrics_dict["num_rays_per_sec"] = num_rays / (time() - inner_start)
+    #     fps_str = "fps"
+    #     assert fps_str not in metrics_dict
+    #     metrics_dict[fps_str] = metrics_dict["num_rays_per_sec"] / (height * width)
+    #     metrics_dict_list.append(metrics_dict)
+    #     view_no +=1
+    #     if view_no == 4:
+    #         break
+    #     progress.advance(task)
             
     # average the metrics list
     metrics_dict = {}
@@ -438,7 +709,7 @@ class ComputeMetrics:
     unc_path: Path = Path("unc.npy")
     # Render with filtering.
     dataset_path: Path = Path("./data")
-    # dataset path    
+    # dataset path
     downscale_factor: float = 2.0
     filter_out: bool = False
     # filter floater results
@@ -449,7 +720,6 @@ class ComputeMetrics:
     eval_depth: bool = True
     #perform evaluation on depth error
         
-
     def main(self) -> None:
         """Main function."""
         
@@ -507,22 +777,18 @@ class ComputeMetrics:
         timestamp = datetime.now().timestamp()
         date_time = datetime.fromtimestamp(timestamp)
         str_date_time = date_time.strftime("%d-%m-%Y-%H%M%S")
-        csv_path = str(self.output_path).split('.')[0] + '_' + config.experiment_name + '_'+ str_date_time + nb_filter +'.csv'
+        csv_path = str(self.output_path).split('.')[0] + '.csv'
         
         np.savetxt(csv_path, [p for p in zip(*metric_lists)], delimiter=',', fmt='%s')
         CONSOLE.print(f"Saved results to: {self.output_path}")
-
 
 def entrypoint():
     """Entrypoint for use with pyproject scripts."""
     tyro.extras.set_accent_color("bright_yellow")
     tyro.cli(ComputeMetrics).main()
 
-
 if __name__ == "__main__":
     entrypoint()
 
 # For sphinx docs
-
-
 def get_parser_fn(): return tyro.extras.get_parser(ComputeMetrics)  # noqa

@@ -1,0 +1,9 @@
+[console_scripts]
+ns-eval-u = bayessdf.scripts.eval_uncertainty:entrypoint
+ns-render-u = bayessdf.scripts.render_uncertainty:entrypoint
+ns-uncertainty = bayessdf.scripts.uncertainty:entrypoint
+ns-viewer-u = bayessdf.scripts.viewer_uncertainty.run_viewer_u:entrypoint
+
+[nerfstudio.dataparser_configs]
+nb-dataparser = bayessdf.dataparsers.nerfbusters.nerfbuster_config:nbDataparser
+sparse-nerfstudio = bayessdf.dataparsers.sparse.sparse_nerfstudio_config:sparseNsDataparser

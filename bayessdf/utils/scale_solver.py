@@ -159,7 +159,7 @@ def read_gt_depth(base_dir, xys):
 def main(args):
     
     print(args)
-    base_dir = Path('/pscratch/sd/m/mzweig/nerf_data') / Path(args.dataset) / Path(args.scene) 
+    base_dir = Path('./data') / Path(args.dataset) / Path(args.scene)
     colmap_dir = base_dir / Path('colmap/sparse/0')
     _, points = read_points_bin(colmap_dir)
     images = read_images_bin(colmap_dir)

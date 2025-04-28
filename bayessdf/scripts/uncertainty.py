@@ -1,29 +1,25 @@
-
 #!/usr/bin/env python
-"""
-uncertainty.py
-"""
-from __future__ import annotations
 
-import json
-from dataclasses import dataclass
-from pathlib import Path
-import types
-import time
+from __future__ import annotations # type:ignore
 
-import tyro
-import torch
-import numpy as np
-import nerfstudio
-import nerfacc
-import pkg_resources
-from nerfstudio.utils.eval_utils import eval_setup
-from nerfstudio.utils.rich_utils import CONSOLE
-from nerfstudio.models.neus_facto import NeuSFactoModel
-from nerfstudio.field_components.field_heads import FieldHeadNames
-from nerfstudio.field_components.encodings import HashEncoding
-from bayessdf.utils.utils import normalize_point_coords, find_grid_indices, get_gaussian_blob_new
-
+import time # type:ignore
+import tyro # type:ignore
+import torch # type:ignore
+import numpy as np # type:ignore
+import pkg_resources # type:ignore
+import json # type:ignore
+import types # type:ignore
+import nerfstudio # type:ignore
+import nerfacc # type:ignore
+import ipdb # type:ignore
+from dataclasses import dataclass # type:ignore
+from pathlib import Path # type:ignore
+from nerfstudio.utils.eval_utils import eval_setup # type:ignore
+from nerfstudio.utils.rich_utils import CONSOLE # type:ignore
+from nerfstudio.models.neus_facto import NeuSFactoModel # type:ignore
+from nerfstudio.field_components.field_heads import FieldHeadNames # type:ignore
+from nerfstudio.field_components.encodings import HashEncoding # type:ignore
+from bayessdf.utils.utils import normalize_point_coords, find_grid_indices, get_gaussian_blob_new # type:ignore
 
 @dataclass
 class ComputeUncertainty:
@@ -32,13 +28,13 @@ class ComputeUncertainty:
     # Path to config YAML file.
     load_config: Path
     # Name of the output file.
-    output_path: Path = Path("unc.npy")
+    output_path: Path = Path("geo_unc.npy")
     # Uncertainty level of detail (log2 of it)
     lod: int = 8
-    # number of iterations on the trainset    
+    # number of iterations on the trainset
     iters: int = 1000         
     
-    def find_uncertainty(self, points, deform_points, sdf, distortion):
+    def find_uncertainty(self, points, sdf, deform_points, distortion):
         inds, coeffs = find_grid_indices(points, self.aabb, distortion, self.lod, self.device)
         #because deformation params are detached for each point on each ray from the grid, summation does not affect derivative
         # colors = torch.sum(rgb, dim=0)
@@ -55,9 +51,9 @@ class ComputeUncertainty:
         # first = True
         sdf = torch.sum(sdf)
         sdf.backward(retain_graph=True)
-        sdf_value = deform_points.grad.clone().detach().view(-1,3)
-        deform_points.grad.zero_()
-        dmy = (torch.arange(points.shape[0])[...,None]).repeat((1,points.shape[1])).flatten().to(self.device)
+        sdf_value = deform_points.clone().detach()
+        deform_points.zero_()
+        dmy = (torch.arange(points.shape[0])[...,None]).flatten().to(self.device)
         first = True
 
         for corner in range(8):
@@ -66,14 +62,14 @@ class ComputeUncertainty:
                 # all_r = coeffs[corner].unsqueeze(-1)*r
                 # all_g = coeffs[corner].unsqueeze(-1)*g
                 # all_b = coeffs[corner].unsqueeze(-1)*b
-                all_sdf = coeffs[corner].unsqueeze(-1)*sdf_value
+                all_sdf = coeffs[corner]*sdf_value
                 first = False
             else:
                 all_ind = torch.cat((all_ind, torch.cat((dmy.unsqueeze(-1),inds[corner].unsqueeze(-1)), dim=-1)), dim=0)
                 # all_r = torch.cat((all_r, coeffs[corner].unsqueeze(-1)*r), dim=0)
                 # all_g = torch.cat((all_g, coeffs[corner].unsqueeze(-1)*g), dim=0)
                 # all_b = torch.cat((all_b, coeffs[corner].unsqueeze(-1)*b ), dim=0)
-                all_sdf = torch.cat((all_sdf, coeffs[corner].unsqueeze(-1)*sdf_value ), dim=0)
+                all_sdf = torch.cat((all_sdf, coeffs[corner]*sdf_value), dim=0)
         keys_all, inds_all = torch.unique(all_ind, dim=0, return_inverse=True)
         # grad_r_1 = torch.bincount(inds_all, weights=all_r[...,0]) #for first element of deformation field
         # grad_g_1 = torch.bincount(inds_all, weights=all_g[...,0])
@@ -86,14 +82,12 @@ class ComputeUncertainty:
         # grad_b_3 = torch.bincount(inds_all, weights=all_b[...,2])
         # grad_1 = grad_r_1**2+grad_g_1**2+grad_b_1**2
         # grad_2 = grad_r_2**2+grad_g_2**2+grad_b_2**2
-        # grad_3 = grad_r_3**2+grad_g_3**2+grad_b_3**2 #will consider the trace of each submatrix for each deformation
-        # #vector as indicator of hessian wrt the whole vector
+        # grad_3 = grad_r_3**2+grad_g_3**2+grad_b_3**2 # will consider the trace of each submatrix for each deformation
+        # # vector as indicator of hessian wrt the whole vector
         
-        grad_1 = torch.bincount(inds_all, weights=all_sdf[...,0])
-        grad_2 = torch.bincount(inds_all, weights=all_sdf[...,1])
-        grad_3 = torch.bincount(inds_all, weights=all_sdf[...,2])
+        grad = torch.bincount(inds_all, weights=all_sdf)
 
-        grads_all = torch.cat((keys_all[:,1].unsqueeze(-1), (grad_1+grad_2+grad_3).unsqueeze(-1)), dim=-1)
+        grads_all = torch.cat((keys_all[:,1].unsqueeze(-1), (grad).unsqueeze(-1)), dim=-1)
         hessian = torch.zeros(((2**self.lod)+1)**3).to(self.device)
         hessian = hessian.put((grads_all[:,0]).long(), grads_all[:,1], True)
 
@@ -127,9 +121,8 @@ class ComputeUncertainty:
         # offsets.retain_grad()
         
         # compute sdf
+        sdf = model.field.forward_geonetwork(points.contiguous())[:, 0]
 
-        sdf = model.field.forward_geonetwork(points)[:, 0]
-        import pdb; pdb.set_trace()
         # ray_samples.frustums.set_offsets(offsets)    
         # field_outputs = model.field(ray_samples, return_alphas=True)
 
@@ -249,7 +242,9 @@ class ComputeUncertainty:
                             max_res = 2**self.lod,
                             log2_hashmap_size = self.lod*3+1, #simple regular grid (hash table size > grid size)
                             features_per_level = 3,
-                            hash_init_scale = 0.,
+                            # hash_init_scale = 0.,
+                            hash_init_scale = 1.,
+                            # hash_init_scale = 50.,
                             implementation = "torch",
                             interpolation = "Linear")
         self.deform_field.to(self.device)

@@ -1,0 +1,9 @@
+README.md
+pyproject.toml
+bayessdf/__init__.py
+bayessdf.egg-info/PKG-INFO
+bayessdf.egg-info/SOURCES.txt
+bayessdf.egg-info/dependency_links.txt
+bayessdf.egg-info/entry_points.txt
+bayessdf.egg-info/requires.txt
+bayessdf.egg-info/top_level.txt

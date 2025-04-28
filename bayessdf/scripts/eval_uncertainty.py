@@ -1,21 +1,5 @@
-# Copyright 2022 the Regents of the University of California, Nerfstudio Team and contributors. All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 #!/usr/bin/env python
-"""
-eval.py
-"""
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -56,14 +40,169 @@ from matplotlib.cm import inferno
 
 from bayessdf.scripts.output_uncertainty import get_output_nerfacto_new, get_output_mipnerf_new, get_output_ngp_new, get_output_fn, get_output_nerfacto_all, get_uncertainty
 
-def plot_errors(ratio_removed, ause_err, ause_err_by_var, err_type, scene_no, output_path): #AUSE plots, with oracle curve also visible
-    plt.plot(ratio_removed, ause_err, '--')
-    plt.plot(ratio_removed, ause_err_by_var, '-r')
-    # plt.plot(ratio_removed, ause_err_by_var - ause_err, '-g') # uncomment for getting plots similar to the paper, without visible oracle curve
-    path = output_path.parent / Path("plots") 
+def calculate_grid(pred_sdf, gt_sdf, type):
+    if pred_sdf.shape != gt_sdf.shape:
+        raise ValueError("Predicted SDF and Ground Truth SDF Do Not Have Same Shape")
+    if type == 'mae':
+        return np.abs(pred_sdf - gt_sdf)
+    elif type == 'mse':
+        return np.abs(pred_sdf - gt_sdf) ** 2
+    else:
+        return np.sqrt((1 / len(pred_sdf) * (np.abs(pred_sdf - gt_sdf) ** 2)))
+
+def calculate_ensemble_curve(variance_grid, mae_grid):
+    variances = variance_grid.flatten()
+    mae_values = mae_grid.flatten()
+
+    sorted_values = np.sort(mae_values)
+    
+    sorted_var_indices = np.argsort(-variances)
+    sorted_var_values = mae_values[sorted_var_indices]
+
+    cumulative_mae = np.cumsum(sorted_values) / np.arange(1, len(sorted_values) + 1)
+    cumulative_var_mae = np.cumsum(sorted_var_values) / np.arange(1, len(sorted_var_values) + 1)
+
+    return cumulative_mae, cumulative_var_mae
+
+# def plot_errors(ratio_removed, ause_err, ause_err_by_var, err_type, scene_no, output_path, cumulative_mae, cumulative_var_mae, render_mae, render_var_mae):
+def plot_errors(ratio_removed, ause_err, ause_err_by_var, err_type, scene_no, output_path):
+    plt.figure(figsize=(8, 5))
+    plt.plot(ratio_removed, ause_err, color='purple', label=f'{err_type.upper()} Unc Sorted')
+    plt.legend(loc='best', fontsize=6)
+    plt.title(f'Δ{err_type.upper()} vs. Pixel Sparsification', fontsize=18)
+    plt.xlabel('Pixel Sparsification (Most Uncertain to Most Certain %)', fontsize=14)
+    plt.ylabel(f'Cumulative Δ{err_type.upper()}', fontsize=14)
+    plt.xticks([0, 0.25, 0.5, 0.75, 1], ['Most Uncertain Pixel', '25% Uncertainty', '50% Uncertainty', '75% Uncertainty', 'Most Certain Pixel'], fontsize=6)
+    for i in np.arange(0, 1, 0.2):
+        plt.axhspan(i, i + 0.2, facecolor='lightgreen', alpha=0.7, zorder=-1)
+    plt.grid(True, color='white', linewidth=0.7)
+    ax = plt.gca()
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    path = output_path.parent / Path("geo_eval_plots") 
     path.mkdir(parents=True, exist_ok=True)
-    plt.savefig(path/ Path('plot_'+err_type+'_'+str(scene_no)+'.png'))
-    plt.figure()
+    plt.savefig(path / Path('mae_norm_' + err_type + '_' + str(scene_no) + '.png'))
+    plt.close()
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(ratio_removed, ause_err, label=f'{err_type.upper()} Unc Sorted', color="purple", linewidth=2)
+    plt.xlabel(f"Pixel Sparsification (Most Uncertain to Most Certain %)")
+    plt.ylabel(f'Cumulative Δ{err_type.upper()}')
+    plt.title(f"Δ{err_type.upper()} vs. Pixel Sparsification")
+    plt.legend()
+    plt.grid()
+    path = output_path.parent / Path("geo_unc_plots") 
+    path.mkdir(parents=True, exist_ok=True)
+    plt.savefig(path / Path('mae_norm_' + err_type + '_' + str(scene_no) + '.png'))
+    plt.close()
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(ratio_removed, ause_err_by_var, color='blue', label=f'{err_type.upper()} Unc Sorted By Var')
+    plt.legend(loc='best', fontsize=6)
+    plt.title(f'Δ{err_type.upper()} vs. Pixel Sparsification', fontsize=18)
+    plt.xlabel('Pixel Sparsification (Most Uncertain to Most Certain %)', fontsize=14)
+    plt.ylabel(f'Cumulative Δ{err_type.upper()}', fontsize=14)
+    plt.xticks([0, 0.25, 0.5, 0.75, 1], ['Most Uncertain Pixel', '25% Uncertainty', '50% Uncertainty', '75% Uncertainty', 'Most Certain Pixel'], fontsize=6)
+    for i in np.arange(0, 1, 0.2):
+        plt.axhspan(i, i + 0.2, facecolor='lightgreen', alpha=0.7, zorder=-1)
+    plt.grid(True, color='white', linewidth=0.7)
+    ax = plt.gca()
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    path = output_path.parent / Path("geo_eval_plots") 
+    path.mkdir(parents=True, exist_ok=True)
+    plt.savefig(path / Path('mae_var_' + err_type + '_' + str(scene_no) + '.png'))
+    plt.close()
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(ratio_removed, ause_err_by_var, label=f'{err_type.upper()} Unc Sorted By Var', color="blue", linewidth=2)
+    plt.xlabel(f"Pixel Sparsification (Most Uncertain to Most Certain %)")
+    plt.ylabel(f'Cumulative Δ{err_type.upper()}')
+    plt.title(f"Δ{err_type.upper()} vs. Pixel Sparsification")
+    plt.legend()
+    plt.grid()
+    path = output_path.parent / Path("geo_unc_plots") 
+    path.mkdir(parents=True, exist_ok=True)
+    plt.savefig(path / Path('mae_var_' + err_type + '_' + str(scene_no) + '.png'))
+    plt.close()
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(ratio_removed, abs(ause_err_by_var - ause_err), color='red', label=f'{err_type.upper()} Unc Difference')
+    plt.legend(loc='best', fontsize=6)
+    plt.title(f'Δ{err_type.upper()} vs. Pixel Sparsification', fontsize=18)
+    plt.xlabel('Pixel Sparsification (Most Uncertain to Most Certain %)', fontsize=14)
+    plt.ylabel(f'Cumulative Δ{err_type.upper()}', fontsize=14)
+    plt.xticks([0, 0.25, 0.5, 0.75, 1], ['Most Uncertain Pixel', '25% Uncertainty', '50% Uncertainty', '75% Uncertainty', 'Most Certain Pixel'], fontsize=6)
+    for i in np.arange(0, 1, 0.2):
+        plt.axhspan(i, i + 0.2, facecolor='lightgreen', alpha=0.7, zorder=-1)
+    plt.grid(True, color='white', linewidth=0.7)
+    ax = plt.gca()
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    path = output_path.parent / Path("geo_eval_plots") 
+    path.mkdir(parents=True, exist_ok=True)
+    plt.savefig(path / Path('mae_diff_' + err_type + '_' + str(scene_no) + '.png'))
+    plt.close()
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(ratio_removed, abs(ause_err_by_var - ause_err), label=f'{err_type.upper()} Unc Difference', color="red", linewidth=2)
+    plt.xlabel(f"Pixel Sparsification (Most Uncertain to Most Certain %)")
+    plt.ylabel(f'Cumulative Δ{err_type.upper()}')
+    plt.title(f"Δ{err_type.upper()} vs. Pixel Sparsification")
+    plt.legend()
+    plt.grid()
+    path = output_path.parent / Path("geo_unc_plots") 
+    path.mkdir(parents=True, exist_ok=True)
+    plt.savefig(path / Path('mae_diff_' + err_type + '_' + str(scene_no) + '.png'))
+    plt.close()
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(ratio_removed, ause_err, color='purple', label=f'{err_type.upper()} Unc Sorted')
+    plt.plot(ratio_removed, ause_err_by_var, color='blue', label=f'{err_type.upper()} Unc Sorted By Var')
+    # plt.plot(ratio_removed, cumulative_mae, color='blue', label=f'{err_type.upper()} SDF Err')
+    # plt.plot(ratio_removed, cumulative_var_mae, color='blue', label=f'{err_type.upper()} SDF Var Err')'
+    # plt.plot(ratio_removed, render_mae, color='green', label=f'{err_type.upper()} Renderings Err')
+    # plt.plot(ratio_removed, render_var_mae, color='green', label=f'{err_type.upper()} Renderings Var Err')'
+    plt.plot(ratio_removed, abs(ause_err_by_var - ause_err), color='red', label=f'{err_type.upper()} Unc Difference')
+    # plt.plot(np.linspace(0, 1, len(cumulative_mae)), abs(cumulative_mae - cumulative_var_mae), color='blue', label='SDF (Var-Err)')
+    # plt.plot(np.linspace(0, 1, len(render_mae)), abs(render_mae - render_var_mae), color='green', label='Renerings (Var-Err)')
+    plt.legend(loc='best', fontsize=6)
+    plt.title(f'Δ{err_type.upper()} vs. Pixel Sparsification', fontsize=18)
+    plt.xlabel('Pixel Sparsification (Most Uncertain to Most Certain %)', fontsize=14)
+    plt.ylabel(f'Cumulative Δ{err_type.upper()}', fontsize=14)
+    plt.xticks([0, 0.25, 0.5, 0.75, 1], ['Most Uncertain Pixel', '25% Uncertainty', '50% Uncertainty', '75% Uncertainty', 'Most Certain Pixel'], fontsize=6)
+    for i in np.arange(0, 1, 0.2):
+        plt.axhspan(i, i + 0.2, facecolor='lightgreen', alpha=0.7, zorder=-1)
+    plt.grid(True, color='white', linewidth=0.7)
+    ax = plt.gca()
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    path = output_path.parent / Path("geo_eval_plots") 
+    path.mkdir(parents=True, exist_ok=True)
+    plt.savefig(path / Path('mae_cumul_' + err_type + '_' + str(scene_no) + '.png'))
+    plt.close()
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(ratio_removed, ause_err, label=f'{err_type.upper()} Unc Sorted', color="purple", linewidth=2)
+    plt.plot(ratio_removed, ause_err_by_var, label=f'{err_type.upper()} Unc Sorted By Var', color="blue", linewidth=2)
+    plt.plot(ratio_removed, abs(ause_err_by_var - ause_err), label=f'{err_type.upper()} Unc Difference', color="red", linewidth=2)
+    plt.xlabel(f"Pixel Sparsification (Most Uncertain to Most Certain %)")
+    plt.ylabel(f'Cumulative Δ{err_type.upper()}')
+    plt.title(f"Δ{err_type.upper()} vs. Pixel Sparsification")
+    plt.legend()
+    plt.grid()
+    path = output_path.parent / Path("geo_unc_plots") 
+    path.mkdir(parents=True, exist_ok=True)
+    plt.savefig(path / Path('mae_cumul_' + err_type + '_' + str(scene_no) + '.png'))
+    plt.close()
 
 def visualize_ranks(unc ,gt, colormap='jet'):
     flattened_unc = unc.flatten()
@@ -285,7 +424,7 @@ def get_image_metrics_and_images_unc(self, no:int,
         absolute_error_img = torch.clip(absolute_error, min=0., max=1.)
     
     #save images
-    path = self.output_path.parent / "plots" 
+    path = self.output_path.parent / "geo_images" 
     path.mkdir(parents=True, exist_ok=True)
     if eval_depth:
         im = Image.fromarray((depth_gt.cpu().numpy()* 255).astype('uint8'))
@@ -513,7 +652,7 @@ class ComputeMetrics:
         timestamp = datetime.now().timestamp()
         date_time = datetime.fromtimestamp(timestamp)
         str_date_time = date_time.strftime("%d-%m-%Y-%H%M%S")
-        csv_path = str(self.output_path).split('.')[0] + '_' + config.experiment_name + '_'+ str_date_time + nb_filter +'.csv'
+        csv_path = str(self.output_path).split('.')[0] + '.csv'
         
         np.savetxt(csv_path, [p for p in zip(*metric_lists)], delimiter=',', fmt='%s')
         CONSOLE.print(f"Saved results to: {self.output_path}")

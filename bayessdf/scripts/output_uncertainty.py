@@ -163,7 +163,6 @@ def get_output_neusfacto(self, ray_bundle):
     }
                                     
     original_outputs['uncertainty'] = uncertainty 
-    import pdb; pdb.set_trace()
     # TODO: SAVE Uncertainty
     if self.training:
         original_outputs["weights_list"] = weights_list

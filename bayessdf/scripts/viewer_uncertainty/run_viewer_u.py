@@ -29,11 +29,12 @@ import numpy as np
 import types
 
 import nerfstudio
-import pkg_resources
+import importlib.metadata as importlib_metadata
 import nerfacc
 
 from nerfstudio.configs.base_config import ViewerConfig
-from nerfstudio.configs.base_config import TrainerConfig
+# from nerfstudio.configs.base_config import TrainerConfig
+from nerfstudio.engine.trainer import TrainerConfig
 from nerfstudio.pipelines.base_pipeline import Pipeline
 from nerfstudio.utils import writer, colors
 from nerfstudio.utils.eval_utils import eval_setup
@@ -43,16 +44,17 @@ from bayessdf.utils.utils import find_grid_indices
 import torch.nn.functional as F
 from bayessdf.scripts.output_uncertainty import get_uncertainty
 
-if pkg_resources.get_distribution("nerfstudio").version >= "0.3.1":
-    from nerfstudio.viewer.server.viewer_state import ViewerState
+if importlib_metadata.version("nerfstudio") >= "0.3.1":
+    # from nerfstudio.viewer.server.viewer_state import ViewerState
+    from nerfstudio.viewer.viewer import Viewer as ViewerState
     from nerfstudio.viewer.server.viewer_elements import  ViewerSlider
 else:
     from nerfstudio.viewer.server import viewer_utils
     from nerfstudio.utils.writer import EventName, TimeWriter
 
-
 def get_output_neus_facto_new(self, ray_bundle):
     ''' reimplementation of get_output function from models because of lack of proper interface to outputs dict'''
+    import ipdb; ipdb.set_trace()
     
     N = self.N 
     reg_lambda = 1e-4 /( (2**self.lod)**3)
@@ -61,6 +63,7 @@ def get_output_neus_facto_new(self, ray_bundle):
             
     max_uncertainty = 6 #approximate upper bound of the function log10(1/(x+lambda)) when lambda=1e-4/(256^3) and x is the hessian
     min_uncertainty = -3 #approximate lower bound of that function (cutting off at hessian = 1000)
+
     # density_fns_new = []
     # num_fns = len(self.density_fns) 
     # for i in self.density_fns:
@@ -77,29 +80,35 @@ def get_output_neus_facto_new(self, ray_bundle):
 
     points = ray_samples.frustums.get_positions()
     un_points = self.get_uncertainty(points)
+
     #get weights
     # density = field_outputs[FieldHeadNames.DENSITY] * (un_points <= self.filter_thresh*max_uncertainty)
-    # weights = ray_samples.get_weights(density)
-    weights = ray_samples.get_weights_from_alphas(field_outputs[FieldHeadNames.ALPHA])
+    density = field_outputs[FieldHeadNames.ALPHA] * (un_points <= self.filter_thresh*max_uncertainty)
+    weights = ray_samples.get_weights(density)
+    # weights = ray_samples.get_weights_from_alphas(field_outputs[FieldHeadNames.ALPHA])
     
     uncertainty = torch.sum(weights * un_points, dim=-2) 
     uncertainty += (1-torch.sum(weights,dim=-2)) * min_uncertainty #alpha blending
     
     #normalize into acceptable range for rendering
-    print("uncertainty min: ", torch.min(uncertainty))
-    print("uncertainty max: ", torch.max(uncertainty))
+    # print("uncertainty min: ", torch.min(uncertainty), "uncertainty max: ", torch.max(uncertainty))
     uncertainty = torch.clip(uncertainty, min_uncertainty, max_uncertainty)
     uncertainty = (uncertainty-min_uncertainty)/(max_uncertainty-min_uncertainty)
     
-    # if self.white_bg:
-    #     self.renderer_rgb.background_color=colors.WHITE    
-    # elif self.black_bg:
-    #     self.renderer_rgb.background_color=colors.BLACK        
+    if self.white_bg:
+        self.renderer_rgb.background_color=colors.WHITE    
+    elif self.black_bg:
+        self.renderer_rgb.background_color=colors.BLACK     
+
     rgb = self.renderer_rgb(rgb=field_outputs[FieldHeadNames.RGB], weights=weights)
     depth = self.renderer_depth(weights=weights, ray_samples=ray_samples)
-    depth = depth / ray_bundle.directions_norm
 
-    normal = self.renderer_normal(semantics=field_outputs[FieldHeadNames.NORMAL], weights=weights)
+    # depth = depth / ray_bundle.directions_norm
+    depth = depth / ray_bundle.metadata["directions_norm"]
+
+    # normal = self.renderer_normal(semantics=field_outputs[FieldHeadNames.NORMAL], weights=weights)
+    normal = self.renderer_normal(semantics=field_outputs[FieldHeadNames.NORMALS], weights=weights)
+
     accumulation = self.renderer_accumulation(weights=weights)
     
     # this is based on https://arxiv.org/pdf/2211.12656.pdf and the summation is not normalized. Check normalized in the viewer.
@@ -176,7 +185,7 @@ class RunViewerU:
 
     def main(self) -> None:
         """Main function."""
-        if pkg_resources.get_distribution("nerfstudio").version >= "0.3.1":
+        if importlib_metadata.version("nerfstudio") >= "0.3.1":
             config, pipeline, _, step = eval_setup(
                 self.load_config,
                 eval_num_rays_per_chunk=None,
@@ -246,28 +255,25 @@ class RunViewerU:
         base_dir = config.get_base_dir()
         viewer_log_path = base_dir / config.viewer.relative_log_filename
 
-        # if pkg_resources.get_distribution("nerfstudio").version >= "0.3.1":
-        #     viewer_state = ViewerState(
-        #     config.viewer,
-        #     log_filename=viewer_log_path,
-        #     datapath=pipeline.datamanager.get_datapath(),
-        #     pipeline=pipeline,
-        #     )
-        #     viewer_state.control_panel._filter = ViewerSlider(
-        #             "Filter Threshold",
-        #             default_value=1.,
-        #             min_value=0.0,
-        #             max_value=1,
-        #             step=0.05,
-        #             hint="Filtering threshold for uncertain areas.",
-        #         )
-        #     viewer_state.control_panel.add_element(viewer_state.control_panel._filter)
-        #     banner_messages = [f"Viewer at: {viewer_state.viewer_url}"]
-        # else:
-        
-        viewer_state, banner_messages = viewer_utils.setup_viewer(
-            config.viewer, log_filename=viewer_log_path# , datapath=pipeline.datamanager.config.dataparser.data
-        )
+        if importlib_metadata.version("nerfstudio") >= "0.3.1":
+            viewer_state = ViewerState(
+            config.viewer,
+            log_filename=viewer_log_path,
+            datapath=pipeline.datamanager.get_datapath(),
+            pipeline=pipeline,
+            )
+            viewer_state.control_panel._filter = ViewerSlider(
+                    "Filter Threshold",
+                    default_value=1.,
+                    min_value=0.0,
+                    max_value=1,
+                    step=0.05,
+                    hint="Filtering threshold for uncertain areas.",
+                )
+            viewer_state.control_panel.add_element(viewer_state.control_panel._filter)
+            banner_messages = [f"Viewer at: {viewer_state.viewer_info}"]
+        else:
+            viewer_state, banner_messages = viewer_utils.setup_viewer(config.viewer, log_filename=viewer_log_path, datapath=pipeline.datamanager.get_datapath())
 
         # We don't need logging, but writer.GLOBAL_BUFFER needs to be populated
         config.logging.local_writer.enable = False
@@ -276,7 +282,7 @@ class RunViewerU:
 
         assert viewer_state and pipeline.datamanager.train_dataset
 
-        nerfstudio_version = pkg_resources.get_distribution("nerfstudio").version
+        nerfstudio_version = importlib_metadata.version("nerfstudio")
 
         if nerfstudio_version >= "0.3.1":
             if nerfstudio_version >=  "0.3.3":
@@ -289,7 +295,8 @@ class RunViewerU:
                     dataset=pipeline.datamanager.train_dataset,
                     train_state="completed",
                 )
-            viewer_state.viser_server.set_training_state("completed")
+            # viewer_state.viser_server.set_training_state("completed")
+            # viewer_state.update_step("completed")
             viewer_state.update_scene(step=step)
             while True:
                 time.sleep(0.01)
@@ -383,3 +390,4 @@ if __name__ == "__main__":
 
 # For sphinx docs
 get_parser_fn = lambda: tyro.extras.get_parser(RunViewerU)  # noqa
+

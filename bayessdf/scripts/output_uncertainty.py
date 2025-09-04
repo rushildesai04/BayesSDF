@@ -158,8 +158,8 @@ def get_output_neusfacto(self, ray_bundle):
 
     rgb = self.renderer_rgb(rgb=field_outputs[FieldHeadNames.RGB], weights=weights)
     depth = self.renderer_depth(weights=weights, ray_samples=ray_samples)
-    depth = depth / ray_bundle.directions_norm
-    # depth = depth / ray_bundle.metadata["directions_norm"] # NERFSTUDIO
+    # depth = depth / ray_bundle.directions_norm
+    depth = depth / ray_bundle.metadata["directions_norm"] # NERFSTUDIO
     accumulation = self.renderer_accumulation(weights=weights)
 
     original_outputs = {"rgb": rgb, "accumulation": accumulation, "depth": depth, 'uncertainty': uncertainty}
@@ -170,25 +170,25 @@ def get_output_neusfacto(self, ray_bundle):
 
     # TODO: Ignore normals since NeuS has FieldHeadNames.NORMAL but not FieldHeadNames.PRED_NORMALS
 
-    original_outputs["normal"] = self.renderer_normal(semantics=field_outputs[FieldHeadNames.NORMAL], weights=weights)  
-    original_outputs["rendered_orientation_loss"] = orientation_loss(weights.detach(), 
-                                                                     field_outputs[FieldHeadNames.NORMAL], 
-                                                                     ray_bundle.directions)
-
-    # original_outputs["normal"] = self.renderer_normal(semantics=field_outputs[FieldHeadNames.NORMALS], weights=weights) # NERFSTUDIO
+    # original_outputs["normal"] = self.renderer_normal(semantics=field_outputs[FieldHeadNames.NORMAL], weights=weights)  
     # original_outputs["rendered_orientation_loss"] = orientation_loss(weights.detach(), 
-    #                                                                  field_outputs[FieldHeadNames.NORMALS], 
-    #                                                                  ray_bundle.directions) # NERFSTUDIO
+    #                                                                  field_outputs[FieldHeadNames.NORMAL], 
+    #                                                                  ray_bundle.directions)
+
+    original_outputs["normal"] = self.renderer_normal(semantics=field_outputs[FieldHeadNames.NORMALS], weights=weights) # NERFSTUDIO
+    original_outputs["rendered_orientation_loss"] = orientation_loss(weights.detach(), 
+                                                                     field_outputs[FieldHeadNames.NORMALS], 
+                                                                     ray_bundle.directions) # NERFSTUDIO
 
     for i in range(self.config.num_proposal_iterations):
         original_outputs[f"prop_depth_{i}"] = self.renderer_depth(weights=weights_list[i], ray_samples=ray_samples_list[i])
 
     original_outputs["sdf"] = sdf_array
     original_outputs["weights"] = model_outputs["weights"]
-    original_outputs["ray_points"] = model_outputs["ray_points"]
+    # original_outputs["ray_points"] = model_outputs["ray_points"]
     original_outputs["normal_vis"] = model_outputs["normal_vis"]
-    original_outputs["directions_norm"] = ray_bundle.directions_norm
-    # original_outputs["directions_norm"] = ray_bundle.metadata["directions_norm"] # NERFSTUDIO
+    # original_outputs["directions_norm"] = ray_bundle.directions_norm
+    original_outputs["directions_norm"] = ray_bundle.metadata["directions_norm"] # NERFSTUDIO
 
     return original_outputs
 

@@ -154,15 +154,15 @@ class ComputeUncertainty:
         depth = model.renderer_depth(weights=weights, ray_samples=ray_samples)
 
         # the rendered depth is point-to-point distance and we should convert to depth
-        depth = depth / ray_bundle.directions_norm
-        # depth = depth / ray_bundle.metadata["directions_norm"] # NERFSTUDIO
+        # depth = depth / ray_bundle.directions_norm
+        depth = depth / ray_bundle.metadata["directions_norm"] # NERFSTUDIO
 
         # remove the rays that don't intersect with the surface
         # hit = (field_outputs[FieldHeadNames.SDF] > 0.0).any(dim=1) & (field_outputs[FieldHeadNames.SDF] < 0).any(dim=1)
         # depth[~hit] = 10000.0
 
-        normal = model.renderer_normal(semantics=field_outputs[FieldHeadNames.NORMAL], weights=weights)
-        # normal = model.renderer_normal(semantics=field_outputs[FieldHeadNames.NORMALS], weights=weights) # NERFSTUDIO
+        # normal = model.renderer_normal(semantics=field_outputs[FieldHeadNames.NORMAL], weights=weights)
+        normal = model.renderer_normal(semantics=field_outputs[FieldHeadNames.NORMALS], weights=weights) # NERFSTUDIO
         accumulation = model.renderer_accumulation(weights=weights)
 
         # TODO add a flat to control how the background model are combined with foreground sdf field
@@ -192,8 +192,8 @@ class ComputeUncertainty:
             "normal": normal,
             "weights": weights,
             "ray_points": model.scene_contraction(ray_samples.frustums.get_start_positions()), # used for creating visiblity mask
-            "directions_norm": ray_bundle.directions_norm,  # used to scale z_vals for free space and sdf loss
-            # "directions_norm": ray_bundle.metadata["directions_norm"], # NERFSTUDIO
+            # "directions_norm": ray_bundle.directions_norm,  # used to scale z_vals for free space and sdf loss
+            "directions_norm": ray_bundle.metadata["directions_norm"], # NERFSTUDIO
         }
 
         if True:
@@ -245,11 +245,10 @@ class ComputeUncertainty:
             sdf_list.append(field_outputs[FieldHeadNames.SDF])
         sdf_arrays = [sdf.cpu().numpy() for sdf in sdf_list]
         stacked_sdf = np.stack(sdf_arrays, axis=0)
-        np.savez("/pscratch/sd/r/rushil/model_ray.npz", sdfs=stacked_sdf)
+        # np.savez("/pscratch/sd/r/rushil/model_ray.npz", sdfs=stacked_sdf)
         print(f"Saved Second SDF")
         
     def get_output_fn(self, model):
-        
         if isinstance(model, NeuSFactoModel):
             return self.get_unc_neusfacto
         else:
